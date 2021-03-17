@@ -1,4 +1,4 @@
 # algae
-Wayland display manager
+WIP Wayland compositor
 
-Very WIP to get acquainted with writing apps for Wayland. Saw a need and want to fill it.
+Very WIP to get acquainted with wlroots and learning wayland along the way
