@@ -12,16 +12,18 @@ add_project_arguments([
 
 cc = meson.get_compiler('c')
 
+wlroots_version = ['>=0.14.0', '<0.15.0']
 wlroots_proj = subproject(
 	'wlroots',
 	default_options: ['examples=false'],
 	required: false,
+        version: wlroots_version,
 )
 
 if wlroots_proj.found()
   wlroots       = wlroots_proj.get_variable('wlroots')
 else
-  wlroots       = dependency('wlroots', version: '>= 0.12.0')
+  wlroots       = dependency('wlroots', version: wlroots_version)
 endif
 
 wayland_server = dependency('wayland-server')
