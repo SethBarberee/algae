@@ -33,25 +33,8 @@ pixman         = dependency('pixman-1')
 drm_full        = dependency('libdrm')
 drm             = drm_full.partial_dependency(compile_args: true, includes: true)
 
+algae_inc = include_directories('include')
+
+subdir('include')
 subdir('protocols')
-
-dependencies = [
-  drm,
-  pixman,
-  server_protos,
-  wayland_server,
-  wayland_protos,
-  wlroots,
-  xkbcommon,
-]
-
-sources = [
-  'main.c',
-]
-
-executable(
-  meson.project_name(),
-  sources,
-  dependencies: dependencies,
-  install: true
-)
+subdir('src')

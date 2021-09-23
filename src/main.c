@@ -1,17 +1,13 @@
 #define _POSIX_C_SOURCE 200112L
+#include <assert.h>
 #include <getopt.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <time.h>
 #include <unistd.h>
-#include <wayland-server-core.h>
-#include <wlr/backend.h>
-#include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_cursor.h>
-#include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_control_v1.h>
-#include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_export_dmabuf_v1.h>
 #include <wlr/types/wlr_gamma_control_v1.h>
 #include <wlr/types/wlr_input_device.h>
@@ -24,10 +20,11 @@
 #include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_xcursor_manager.h>
-#include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/types/wlr_xdg_activation_v1.h>
 #include <wlr/types/wlr_xdg_foreign_registry.h>
 #include <wlr/types/wlr_xdg_foreign_v1.h>
 #include <wlr/types/wlr_xdg_foreign_v2.h>
+#include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_viewporter.h>
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
@@ -39,67 +36,10 @@ enum algae_cursor_mode {
 	ALGAE_CURSOR_RESIZE,
 };
 
-struct algae_server {
-	struct wl_display *wl_display;
-	struct wlr_backend *backend;
-	struct wlr_renderer *renderer;
-
-	struct wlr_xdg_shell *xdg_shell;
-	struct wl_listener new_xdg_surface;
-	struct wl_list views;
-
-	struct wlr_cursor *cursor;
-	struct wlr_xcursor_manager *cursor_mgr;
-	struct wl_listener cursor_motion;
-	struct wl_listener cursor_motion_absolute;
-	struct wl_listener cursor_button;
-	struct wl_listener cursor_axis;
-	struct wl_listener cursor_frame;
-
-	struct wlr_seat *seat;
-	struct wl_listener new_input;
-	struct wl_listener request_cursor;
-	struct wl_listener request_set_selection;
-	struct wl_list keyboards;
-	enum algae_cursor_mode cursor_mode;
-	struct algae_view *grabbed_view;
-	double grab_x, grab_y;
-	struct wlr_box grab_geobox;
-	uint32_t resize_edges;
-
-	struct wlr_output_layout *output_layout;
-	struct wl_list outputs;
-	struct wl_listener new_output;
-};
-
-struct algae_output {
-	struct wl_list link;
-	struct algae_server *server;
-	struct wlr_output *wlr_output;
-	struct wl_listener frame;
-};
-
-struct algae_view {
-	struct wl_list link;
-	struct algae_server *server;
-	struct wlr_xdg_surface *xdg_surface;
-	struct wl_listener map;
-	struct wl_listener unmap;
-	struct wl_listener destroy;
-	struct wl_listener request_move;
-	struct wl_listener request_resize;
-	bool mapped;
-	int x, y;
-};
-
-struct algae_keyboard {
-	struct wl_list link;
-	struct algae_server *server;
-	struct wlr_input_device *device;
-
-	struct wl_listener modifiers;
-	struct wl_listener key;
-};
+#include "server.h"
+#include "algae_view.h"
+#include "algae_output.h"
+#include "algae_keyboard.h"
 
 static void focus_view(struct algae_view *view, struct wlr_surface *surface) {
 	/* Note: this function only deals with keyboard focus. */
@@ -138,8 +78,7 @@ static void focus_view(struct algae_view *view, struct wlr_surface *surface) {
 		keyboard->keycodes, keyboard->num_keycodes, &keyboard->modifiers);
 }
 
-static void keyboard_handle_modifiers(
-		struct wl_listener *listener, void *data) {
+static void keyboard_handle_modifiers(struct wl_listener *listener, void *data) {
 	/* This event is raised when a modifier key, such as shift or alt, is
 	 * pressed. We simply communicate this to the client. */
 	struct algae_keyboard *keyboard =
@@ -182,14 +121,19 @@ static bool handle_keybinding(struct algae_server *server, xkb_keysym_t sym) {
 		wl_list_remove(&current_view->link);
 		wl_list_insert(server->views.prev, &current_view->link);
 		break;
+
+        case XKB_KEY_Return:
+		if (fork() == 0) {
+			execl("/bin/sh", "/bin/sh", "-c", "kitty", (void *)NULL);
+		}
+                break;
 	default:
 		return false;
 	}
 	return true;
 }
 
-static void keyboard_handle_key(
-		struct wl_listener *listener, void *data) {
+static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 	/* This event is raised when a key is pressed or released. */
 	struct algae_keyboard *keyboard =
 		wl_container_of(listener, keyboard, key);
@@ -222,8 +166,7 @@ static void keyboard_handle_key(
 	}
 }
 
-static void server_new_keyboard(struct algae_server *server,
-		struct wlr_input_device *device) {
+static void server_new_keyboard(struct algae_server *server, struct wlr_input_device *device) {
 	struct algae_keyboard *keyboard =
 		calloc(1, sizeof(struct algae_keyboard));
 	keyboard->server = server;
@@ -252,8 +195,7 @@ static void server_new_keyboard(struct algae_server *server,
 	wl_list_insert(&server->keyboards, &keyboard->link);
 }
 
-static void server_new_pointer(struct algae_server *server,
-		struct wlr_input_device *device) {
+static void server_new_pointer(struct algae_server *server, struct wlr_input_device *device) {
 	/* We don't do anything special with pointers. All of our pointer handling
 	 * is proxied through wlr_cursor. On another compositor, you might take this
 	 * opportunity to do libinput configuration on the device to set
@@ -479,8 +421,7 @@ static void server_cursor_motion(struct wl_listener *listener, void *data) {
 	process_cursor_motion(server, event->time_msec);
 }
 
-static void server_cursor_motion_absolute(
-		struct wl_listener *listener, void *data) {
+static void server_cursor_motion_absolute(struct wl_listener *listener, void *data) {
 	/* This event is forwarded by the cursor when a pointer emits an _absolute_
 	 * motion event, from 0..1 on each axis. This happens, for example, when
 	 * wlroots is running under a Wayland window rather than KMS+DRM, and you
@@ -686,6 +627,10 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	 * would let the user configure it. */
 	if (!wl_list_empty(&wlr_output->modes)) {
 		struct wlr_output_mode *mode = wlr_output_preferred_mode(wlr_output);
+                wlr_log(WLR_INFO, "Choosing mode %d Hz, width %d, height %d",
+                    mode->refresh,
+                    mode->width,
+                    mode->height);
 		wlr_output_set_mode(wlr_output, mode);
 		wlr_output_enable(wlr_output, true);
 		if (!wlr_output_commit(wlr_output)) {
@@ -793,6 +738,24 @@ static void xdg_toplevel_request_resize(
 	begin_interactive(view, ALGAE_CURSOR_RESIZE, event->edges);
 }
 
+static void xdg_toplevel_request_maximize(
+		struct wl_listener *listener, void *data) {
+
+	struct algae_view *view = wl_container_of(listener, view, request_maximize);
+	const char *app_id = view->xdg_surface->toplevel->app_id;
+
+        wlr_log(WLR_ERROR, "\"%s\" requested maximise, ignoring", app_id);
+
+        wlr_xdg_surface_schedule_configure(view->xdg_surface);
+}
+
+static void xdg_toplevel_set_title(struct wl_listener *listener, void *data) {
+    struct algae_view *view = wl_container_of(listener, view, set_title);
+    const char *title = view->xdg_surface->toplevel->title;
+    const char *app_id = view->xdg_surface->toplevel->app_id;
+    wlr_log(WLR_DEBUG, "\"%s\" set title \"%s\"", app_id, title);
+}
+
 static void server_new_xdg_surface(struct wl_listener *listener, void *data) {
 	/* This event is raised when wlr_xdg_shell receives a new xdg surface from a
 	 * client, either a toplevel (application window) or popup. */
@@ -822,21 +785,49 @@ static void server_new_xdg_surface(struct wl_listener *listener, void *data) {
 	view->request_move.notify = xdg_toplevel_request_move;
 	wl_signal_add(&toplevel->events.request_move, &view->request_move);
 	view->request_resize.notify = xdg_toplevel_request_resize;
-	wl_signal_add(&toplevel->events.request_resize, &view->request_resize);
+	wl_signal_add(&toplevel->events.request_maximize, &view->request_maximize);
+	view->request_maximize.notify = xdg_toplevel_request_maximize;
+	wl_signal_add(&toplevel->events.request_maximize, &view->request_maximize);
+	view->set_title.notify = xdg_toplevel_set_title;
+	wl_signal_add(&toplevel->events.set_title, &view->set_title);
 
 	/* Add it to the list of views. */
 	wl_list_insert(&server->views, &view->link);
+}
+
+/* TODO: Verify with a client that supports it */
+void xdg_activation_v1_handle_request_activate(struct wl_listener *listener,
+		void *data) {
+	const struct wlr_xdg_activation_v1_request_activate_event *event = data;
+
+	if (!wlr_surface_is_xdg_surface(event->surface)) {
+		return;
+	}
+
+	struct wlr_xdg_surface *xdg_surface =
+		wlr_xdg_surface_from_wlr_surface(event->surface);
+	struct algae_view *view = xdg_surface->data;
+	if (!xdg_surface->mapped || view == NULL) {
+		return;
+	}
+
+	focus_view(view, view->xdg_surface->surface);
 }
 
 void server_init(struct algae_server *server){
 	/* The Wayland display is managed by libwayland. It handles accepting
 	 * clients from the Unix socket, manging Wayland globals, and so on. */
 	server->wl_display = wl_display_create();
+
+        /* Seen lots of other compositors doing this so will do it just in case */
+	server->wl_event_loop = wl_display_get_event_loop(server->wl_display);
+
 	/* The backend is a wlroots feature which abstracts the underlying input and
 	 * output hardware. The autocreate option will choose the most suitable
 	 * backend based on the current environment, such as opening an X11 window
 	 * if an X11 server is running. */
 	server->backend = wlr_backend_autocreate(server->wl_display);
+        assert(server->backend);
 
 	/* If we don't provide a renderer, autocreate makes a GLES2 renderer for us.
 	 * The renderer is responsible for defining the various pixel formats it
@@ -858,12 +849,14 @@ void server_init(struct algae_server *server){
 	/* Creates an output layout, which a wlroots utility for working with an
 	 * arrangement of screens in a physical layout. */
 	server->output_layout = wlr_output_layout_create();
+        wlr_xdg_output_manager_v1_create(server->wl_display, server->output_layout);
 
 	/* Configure a listener to be notified when new outputs are available on the
 	 * backend. */
 	wl_list_init(&server->outputs);
 	server->new_output.notify = server_new_output;
 	wl_signal_add(&server->backend->events.new_output, &server->new_output);
+
 
 	/* Set up our list of views and the xdg-shell. The xdg-shell is a Wayland
 	 * protocol which is used for application windows. For more detail on
@@ -944,6 +937,12 @@ void server_init(struct algae_server *server){
 	wlr_xdg_foreign_v1_create(server->wl_display, foreign_registry);
 	wlr_xdg_foreign_v2_create(server->wl_display, foreign_registry);
 
+        server->xdg_activation_v1 = wlr_xdg_activation_v1_create(server->wl_display);
+	server->xdg_activation_v1_request_activate.notify =
+		xdg_activation_v1_handle_request_activate;
+	wl_signal_add(&server->xdg_activation_v1->events.request_activate,
+		&server->xdg_activation_v1_request_activate);
+
 	// Avoid using "wayland-0" as display socket
 	char name_candidate[16];
         const char *socket;
@@ -972,7 +971,7 @@ void server_init(struct algae_server *server){
 }
 
 int main(int argc, char *argv[]) {
-	wlr_log_init(WLR_DEBUG, NULL); // Let's just leave it as DEBUG for now..
+	wlr_log_init(WLR_DEBUG, NULL);
 	char *startup_cmd = NULL;
 
 	int c;
