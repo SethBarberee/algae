@@ -1,4 +1,4 @@
-#ifndef  ALGAE_VIEW_H
+#ifndef ALGAE_VIEW_H
 #define ALGAE_VIEW_H 
 
 struct algae_view {
@@ -15,6 +15,8 @@ struct algae_view {
 	bool mapped;
 	int x, y;
 };
+
+void focus_view(struct algae_view *view, struct wlr_surface *surface);
 
 #endif // ALGAE_VIEW_H
 

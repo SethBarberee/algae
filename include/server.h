@@ -9,6 +9,14 @@
 #include <wlr/types/wlr_xdg_shell.h>
 
 
+/* For brevity's sake, struct members are annotated where they are used. */
+enum algae_cursor_mode {
+	ALGAE_CURSOR_PASSTHROUGH,
+	ALGAE_CURSOR_MOVE,
+	ALGAE_CURSOR_RESIZE,
+};
+
+
 struct algae_server {
 	struct wl_display *wl_display;
 	struct wl_event_loop *wl_event_loop;

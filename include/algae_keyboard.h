@@ -10,4 +10,6 @@ struct algae_keyboard {
 	struct wl_listener key;
 };
 
+void server_new_keyboard(struct algae_server *server, struct wlr_input_device *device);
+
 #endif // ALGAE_KEYBOARD_H

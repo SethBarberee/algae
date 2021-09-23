@@ -11,189 +11,28 @@
 #include <wlr/types/wlr_export_dmabuf_v1.h>
 #include <wlr/types/wlr_gamma_control_v1.h>
 #include <wlr/types/wlr_input_device.h>
-#include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_matrix.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_output_layout.h>
-#include <wlr/types/wlr_pointer.h>
 #include <wlr/types/wlr_primary_selection_v1.h>
 #include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_xcursor_manager.h>
-#include <wlr/types/wlr_xdg_activation_v1.h>
 #include <wlr/types/wlr_xdg_foreign_registry.h>
 #include <wlr/types/wlr_xdg_foreign_v1.h>
 #include <wlr/types/wlr_xdg_foreign_v2.h>
 #include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_viewporter.h>
 #include <wlr/util/log.h>
-#include <xkbcommon/xkbcommon.h>
-
-/* For brevity's sake, struct members are annotated where they are used. */
-enum algae_cursor_mode {
-	ALGAE_CURSOR_PASSTHROUGH,
-	ALGAE_CURSOR_MOVE,
-	ALGAE_CURSOR_RESIZE,
-};
 
 #include "server.h"
 #include "algae_view.h"
 #include "algae_output.h"
 #include "algae_keyboard.h"
+#include "xdg_activation.h"
 
-static void focus_view(struct algae_view *view, struct wlr_surface *surface) {
-	/* Note: this function only deals with keyboard focus. */
-	if (view == NULL) {
-		return;
-	}
-	struct algae_server *server = view->server;
-	struct wlr_seat *seat = server->seat;
-	struct wlr_surface *prev_surface = seat->keyboard_state.focused_surface;
-	if (prev_surface == surface) {
-		/* Don't re-focus an already focused surface. */
-		return;
-	}
-	if (prev_surface) {
-		/*
-		 * Deactivate the previously focused surface. This lets the client know
-		 * it no longer has focus and the client will repaint accordingly, e.g.
-		 * stop displaying a caret.
-		 */
-		struct wlr_xdg_surface *previous = wlr_xdg_surface_from_wlr_surface(
-					seat->keyboard_state.focused_surface);
-		wlr_xdg_toplevel_set_activated(previous, false);
-	}
-	struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(seat);
-	/* Move the view to the front */
-	wl_list_remove(&view->link);
-	wl_list_insert(&server->views, &view->link);
-	/* Activate the new surface */
-	wlr_xdg_toplevel_set_activated(view->xdg_surface, true);
-	/*
-	 * Tell the seat to have the keyboard enter this surface. wlroots will keep
-	 * track of this and automatically send key events to the appropriate
-	 * clients without additional work on your part.
-	 */
-	wlr_seat_keyboard_notify_enter(seat, view->xdg_surface->surface,
-		keyboard->keycodes, keyboard->num_keycodes, &keyboard->modifiers);
-}
-
-static void keyboard_handle_modifiers(struct wl_listener *listener, void *data) {
-	/* This event is raised when a modifier key, such as shift or alt, is
-	 * pressed. We simply communicate this to the client. */
-	struct algae_keyboard *keyboard =
-		wl_container_of(listener, keyboard, modifiers);
-	/*
-	 * A seat can only have one keyboard, but this is a limitation of the
-	 * Wayland protocol - not wlroots. We assign all connected keyboards to the
-	 * same seat. You can swap out the underlying wlr_keyboard like this and
-	 * wlr_seat handles this transparently.
-	 */
-	wlr_seat_set_keyboard(keyboard->server->seat, keyboard->device);
-	/* Send modifiers to the client. */
-	wlr_seat_keyboard_notify_modifiers(keyboard->server->seat,
-		&keyboard->device->keyboard->modifiers);
-}
-
-static bool handle_keybinding(struct algae_server *server, xkb_keysym_t sym) {
-	/*
-	 * Here we handle compositor keybindings. This is when the compositor is
-	 * processing keys, rather than passing them on to the client for its own
-	 * processing.
-	 *
-	 * This function assumes Alt is held down.
-	 */
-	switch (sym) {
-	case XKB_KEY_Escape:
-		wl_display_terminate(server->wl_display);
-		break;
-	case XKB_KEY_F1:
-		/* Cycle to the next view */
-		if (wl_list_length(&server->views) < 2) {
-			break;
-		}
-		struct algae_view *current_view = wl_container_of(
-			server->views.next, current_view, link);
-		struct algae_view *next_view = wl_container_of(
-			current_view->link.next, next_view, link);
-		focus_view(next_view, next_view->xdg_surface->surface);
-		/* Move the previous view to the end of the list */
-		wl_list_remove(&current_view->link);
-		wl_list_insert(server->views.prev, &current_view->link);
-		break;
-
-        case XKB_KEY_Return:
-		if (fork() == 0) {
-			execl("/bin/sh", "/bin/sh", "-c", "kitty", (void *)NULL);
-		}
-                break;
-	default:
-		return false;
-	}
-	return true;
-}
-
-static void keyboard_handle_key(struct wl_listener *listener, void *data) {
-	/* This event is raised when a key is pressed or released. */
-	struct algae_keyboard *keyboard =
-		wl_container_of(listener, keyboard, key);
-	struct algae_server *server = keyboard->server;
-	struct wlr_event_keyboard_key *event = data;
-	struct wlr_seat *seat = server->seat;
-
-	/* Translate libinput keycode -> xkbcommon */
-	uint32_t keycode = event->keycode + 8;
-	/* Get a list of keysyms based on the keymap for this keyboard */
-	const xkb_keysym_t *syms;
-	int nsyms = xkb_state_key_get_syms(
-			keyboard->device->keyboard->xkb_state, keycode, &syms);
-
-	bool handled = false;
-	uint32_t modifiers = wlr_keyboard_get_modifiers(keyboard->device->keyboard);
-	if ((modifiers & WLR_MODIFIER_ALT) && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-		/* If alt is held down and this button was _pressed_, we attempt to
-		 * process it as a compositor keybinding. */
-		for (int i = 0; i < nsyms; i++) {
-			handled = handle_keybinding(server, syms[i]);
-		}
-	}
-
-	if (!handled) {
-		/* Otherwise, we pass it along to the client. */
-		wlr_seat_set_keyboard(seat, keyboard->device);
-		wlr_seat_keyboard_notify_key(seat, event->time_msec,
-			event->keycode, event->state);
-	}
-}
-
-static void server_new_keyboard(struct algae_server *server, struct wlr_input_device *device) {
-	struct algae_keyboard *keyboard =
-		calloc(1, sizeof(struct algae_keyboard));
-	keyboard->server = server;
-	keyboard->device = device;
-
-	/* We need to prepare an XKB keymap and assign it to the keyboard. This
-	 * assumes the defaults (e.g. layout = "us"). */
-	struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-	struct xkb_keymap *keymap = xkb_keymap_new_from_names(context, NULL,
-		XKB_KEYMAP_COMPILE_NO_FLAGS);
-
-	wlr_keyboard_set_keymap(device->keyboard, keymap);
-	xkb_keymap_unref(keymap);
-	xkb_context_unref(context);
-	wlr_keyboard_set_repeat_info(device->keyboard, 25, 600);
-
-	/* Here we set up listeners for keyboard events. */
-	keyboard->modifiers.notify = keyboard_handle_modifiers;
-	wl_signal_add(&device->keyboard->events.modifiers, &keyboard->modifiers);
-	keyboard->key.notify = keyboard_handle_key;
-	wl_signal_add(&device->keyboard->events.key, &keyboard->key);
-
-	wlr_seat_set_keyboard(server->seat, device);
-
-	/* And add the keyboard to our list of keyboards */
-	wl_list_insert(&server->keyboards, &keyboard->link);
-}
+// TODO move to header
+extern void server_new_xdg_surface(struct wl_listener *listener, void *data);
 
 static void server_new_pointer(struct algae_server *server, struct wlr_input_device *device) {
 	/* We don't do anything special with pointers. All of our pointer handling
@@ -607,6 +446,17 @@ static void output_frame(struct wl_listener *listener, void *data) {
 	wlr_output_commit(output->wlr_output);
 }
 
+static void output_remove_notify(struct wl_listener *listener, void *data) {
+	/* This event is rasied by the backend when the output is being destroyed */
+	struct algae_output *output =
+		wl_container_of(listener, output, destroy);
+	struct algae_server *server = output->server;
+	wlr_output_layout_remove(server->output_layout, output->wlr_output);
+	wl_list_remove(&output->frame.link);
+	wl_list_remove(&output->destroy.link);
+	free(output);
+}
+
 static void server_new_output(struct wl_listener *listener, void *data) {
 	/* This event is rasied by the backend when a new output (aka a display or
 	 * monitor) becomes available. */
@@ -646,6 +496,10 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	/* Sets up a listener for the frame notify event. */
 	output->frame.notify = output_frame;
 	wl_signal_add(&wlr_output->events.frame, &output->frame);
+
+	wl_signal_add(&wlr_output->events.destroy, &output->destroy);
+	output->destroy.notify = output_remove_notify;
+
 	wl_list_insert(&server->outputs, &output->link);
 
 	/* Adds this to the output layout. The add_auto function arranges outputs
@@ -658,160 +512,6 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	 * output (such as DPI, scale factor, manufacturer, etc).
 	 */
 	wlr_output_layout_add_auto(server->output_layout, wlr_output);
-}
-
-static void xdg_surface_map(struct wl_listener *listener, void *data) {
-	/* Called when the surface is mapped, or ready to display on-screen. */
-	struct algae_view *view = wl_container_of(listener, view, map);
-	view->mapped = true;
-	focus_view(view, view->xdg_surface->surface);
-}
-
-static void xdg_surface_unmap(struct wl_listener *listener, void *data) {
-	/* Called when the surface is unmapped, and should no longer be shown. */
-	struct algae_view *view = wl_container_of(listener, view, unmap);
-	view->mapped = false;
-}
-
-static void xdg_surface_destroy(struct wl_listener *listener, void *data) {
-	/* Called when the surface is destroyed and should never be shown again. */
-	struct algae_view *view = wl_container_of(listener, view, destroy);
-	wl_list_remove(&view->link);
-	free(view);
-}
-
-static void begin_interactive(struct algae_view *view,
-		enum algae_cursor_mode mode, uint32_t edges) {
-	/* This function sets up an interactive move or resize operation, where the
-	 * compositor stops propegating pointer events to clients and instead
-	 * consumes them itself, to move or resize windows. */
-	struct algae_server *server = view->server;
-	struct wlr_surface *focused_surface =
-		server->seat->pointer_state.focused_surface;
-	if (view->xdg_surface->surface != focused_surface) {
-		/* Deny move/resize requests from unfocused clients. */
-		return;
-	}
-	server->grabbed_view = view;
-	server->cursor_mode = mode;
-
-	if (mode == ALGAE_CURSOR_MOVE) {
-		server->grab_x = server->cursor->x - view->x;
-		server->grab_y = server->cursor->y - view->y;
-	} else {
-		struct wlr_box geo_box;
-		wlr_xdg_surface_get_geometry(view->xdg_surface, &geo_box);
-
-		double border_x = (view->x + geo_box.x) + ((edges & WLR_EDGE_RIGHT) ? geo_box.width : 0);
-		double border_y = (view->y + geo_box.y) + ((edges & WLR_EDGE_BOTTOM) ? geo_box.height : 0);
-		server->grab_x = server->cursor->x - border_x;
-		server->grab_y = server->cursor->y - border_y;
-
-		server->grab_geobox = geo_box;
-		server->grab_geobox.x += view->x;
-		server->grab_geobox.y += view->y;
-
-		server->resize_edges = edges;
-	}
-}
-
-static void xdg_toplevel_request_move(
-		struct wl_listener *listener, void *data) {
-	/* This event is raised when a client would like to begin an interactive
-	 * move, typically because the user clicked on their client-side
-	 * decorations. Note that a more sophisticated compositor should check the
-	 * provied serial against a list of button press serials sent to this
-	 * client, to prevent the client from requesting this whenever they want. */
-	struct algae_view *view = wl_container_of(listener, view, request_move);
-	begin_interactive(view, ALGAE_CURSOR_MOVE, 0);
-}
-
-static void xdg_toplevel_request_resize(
-		struct wl_listener *listener, void *data) {
-	/* This event is raised when a client would like to begin an interactive
-	 * resize, typically because the user clicked on their client-side
-	 * decorations. Note that a more sophisticated compositor should check the
-	 * provied serial against a list of button press serials sent to this
-	 * client, to prevent the client from requesting this whenever they want. */
-	struct wlr_xdg_toplevel_resize_event *event = data;
-	struct algae_view *view = wl_container_of(listener, view, request_resize);
-	begin_interactive(view, ALGAE_CURSOR_RESIZE, event->edges);
-}
-
-static void xdg_toplevel_request_maximize(
-		struct wl_listener *listener, void *data) {
-
-	struct algae_view *view = wl_container_of(listener, view, request_maximize);
-	const char *app_id = view->xdg_surface->toplevel->app_id;
-
-        wlr_log(WLR_ERROR, "\"%s\" requested maximise, ignoring", app_id);
-
-        wlr_xdg_surface_schedule_configure(view->xdg_surface);
-}
-
-static void xdg_toplevel_set_title(struct wl_listener *listener, void *data) {
-    struct algae_view *view = wl_container_of(listener, view, set_title);
-    const char *title = view->xdg_surface->toplevel->title;
-    const char *app_id = view->xdg_surface->toplevel->app_id;
-    wlr_log(WLR_DEBUG, "\"%s\" set title \"%s\"", app_id, title);
-}
-
-static void server_new_xdg_surface(struct wl_listener *listener, void *data) {
-	/* This event is raised when wlr_xdg_shell receives a new xdg surface from a
-	 * client, either a toplevel (application window) or popup. */
-	struct algae_server *server =
-		wl_container_of(listener, server, new_xdg_surface);
-	struct wlr_xdg_surface *xdg_surface = data;
-	if (xdg_surface->role != WLR_XDG_SURFACE_ROLE_TOPLEVEL) {
-		return;
-	}
-
-	/* Allocate a algae_view for this surface */
-	struct algae_view *view =
-		calloc(1, sizeof(struct algae_view));
-	view->server = server;
-	view->xdg_surface = xdg_surface;
-
-	/* Listen to the various events it can emit */
-	view->map.notify = xdg_surface_map;
-	wl_signal_add(&xdg_surface->events.map, &view->map);
-	view->unmap.notify = xdg_surface_unmap;
-	wl_signal_add(&xdg_surface->events.unmap, &view->unmap);
-	view->destroy.notify = xdg_surface_destroy;
-	wl_signal_add(&xdg_surface->events.destroy, &view->destroy);
-
-	/* cotd */
-	struct wlr_xdg_toplevel *toplevel = xdg_surface->toplevel;
-	view->request_move.notify = xdg_toplevel_request_move;
-	wl_signal_add(&toplevel->events.request_move, &view->request_move);
-	view->request_resize.notify = xdg_toplevel_request_resize;
-	wl_signal_add(&toplevel->events.request_maximize, &view->request_maximize);
-	view->request_maximize.notify = xdg_toplevel_request_maximize;
-	wl_signal_add(&toplevel->events.request_maximize, &view->request_maximize);
-	view->set_title.notify = xdg_toplevel_set_title;
-	wl_signal_add(&toplevel->events.set_title, &view->set_title);
-
-	/* Add it to the list of views. */
-	wl_list_insert(&server->views, &view->link);
-}
-
-/* TODO: Verify with a client that supports it */
-void xdg_activation_v1_handle_request_activate(struct wl_listener *listener,
-		void *data) {
-	const struct wlr_xdg_activation_v1_request_activate_event *event = data;
-
-	if (!wlr_surface_is_xdg_surface(event->surface)) {
-		return;
-	}
-
-	struct wlr_xdg_surface *xdg_surface =
-		wlr_xdg_surface_from_wlr_surface(event->surface);
-	struct algae_view *view = xdg_surface->data;
-	if (!xdg_surface->mapped || view == NULL) {
-		return;
-	}
-
-	focus_view(view, view->xdg_surface->surface);
 }
 
 void server_init(struct algae_server *server){
@@ -930,7 +630,9 @@ void server_init(struct algae_server *server){
 	wlr_screencopy_manager_v1_create(server->wl_display);
 	wlr_data_control_manager_v1_create(server->wl_display);
 	wlr_primary_selection_v1_device_manager_create(server->wl_display);
-	wlr_viewporter_create(server->wl_display);
+
+        // NOTE: this is actually a lot more involved...
+	//wlr_viewporter_create(server->wl_display);
 
 	struct wlr_xdg_foreign_registry *foreign_registry =
 		wlr_xdg_foreign_registry_create(server->wl_display);
@@ -971,7 +673,7 @@ void server_init(struct algae_server *server){
 }
 
 int main(int argc, char *argv[]) {
-	wlr_log_init(WLR_DEBUG, NULL);
+	wlr_log_init(WLR_INFO, NULL);
 	char *startup_cmd = NULL;
 
 	int c;
@@ -981,11 +683,11 @@ int main(int argc, char *argv[]) {
 			startup_cmd = optarg;
 			break;
 		default:
-			printf("Usage: %s [-s startup command]\n", argv[0]);
-			return 0;
+                    goto usage;
 		}
 	}
 	if (optind < argc) {
+            usage:
 		printf("Usage: %s [-s startup command]\n", argv[0]);
 		return 0;
 	}
