@@ -19,9 +19,11 @@ enum algae_cursor_mode {
 
 struct algae_server {
 	struct wl_display *wl_display;
-	struct wl_event_loop *wl_event_loop;
 	struct wlr_backend *backend;
 	struct wlr_renderer *renderer;
+	struct wlr_allocator *allocator;
+	struct wlr_scene *scene;
+	struct wlr_scene_output_layout *scene_layout;
 
 	struct wlr_xdg_shell *xdg_shell;
 	struct wl_listener new_xdg_surface;
@@ -46,8 +48,8 @@ struct algae_server {
 	struct wlr_box grab_geobox;
 	uint32_t resize_edges;
 
-        struct wlr_xdg_activation_v1 *xdg_activation_v1;
-	struct wl_listener xdg_activation_v1_request_activate;
+    //struct wlr_xdg_activation_v1 *xdg_activation_v1;
+	//struct wl_listener xdg_activation_v1_request_activate;
 
 	struct wlr_output_layout *output_layout;
 	struct wl_list outputs;

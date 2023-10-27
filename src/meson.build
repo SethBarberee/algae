@@ -9,10 +9,6 @@ dependencies = [
 ]
 
 sources = [
-  'algae_keyboard.c',
-  'algae_view.c',
-  'xdg_activation.c',
-  'xdg_surface.c',
   'main.c',
 ]
 

@@ -12,7 +12,7 @@ add_project_arguments([
 
 cc = meson.get_compiler('c')
 
-wlroots_version = ['>=0.14.0', '<0.15.0']
+wlroots_version = ['>=0.17.0', '<0.18.0']
 wlroots_proj = subproject(
 	'wlroots',
 	default_options: ['examples=false'],
